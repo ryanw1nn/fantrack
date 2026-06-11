@@ -1,0 +1,17 @@
+# ENV / Secrets
+.env
+.env.*
+!.env.example
+
+# Claude personal overrides
+.claude/settings.local.json
+
+# OS/ editor
+.DS_Store
+.vscode/
+
+# Deps / build (placeholders for later phases)
+node_modules/
+vendor/
+dist/
+

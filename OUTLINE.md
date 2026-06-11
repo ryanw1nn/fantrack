@@ -37,7 +37,7 @@ proven CQRS + Event-Driven, schema-per-tenant microservices pattern. Frontend mi
 Set this up *before* writing app code so every later phase benefits. Mirrors what
 `tenant-api-net` already does (it ships a `CLAUDE.md` + `.claude/` dir).
 
-### 0.1 Repo + memory scaffolding
+### 0.1 Repo + memory scaffolding ✅ COMPLETE
 - `git init`, set remote to `git@github.com:ryanw1nn/<repo>.git` (always use the `ryanw1nn`
   account).
 - Create root **`CLAUDE.md`** (project memory). Seed it with: architecture summary, the

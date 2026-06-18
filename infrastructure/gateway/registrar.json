@@ -1,0 +1,17 @@
+{
+     "infrastructure": [
+          ["gateway", 80],
+          ["event-bus", 5672],
+          ["adminer", 8080],
+          ["orchestrator-web", 1000]
+     ],
+     "core-module": [
+          ["auth-service", 9001],
+          ["permission-service", 9002]
+     ],
+     "league-module": [
+          ["league-service", 9010],
+          ["matchup-service", 9011],
+          ["standings-service", 9012]
+     ]
+}

@@ -1,0 +1,17 @@
+# ── @@SVC_NAME@@ ──
+location /@@SVC_NAME@@/ {
+    access_log /dev/stdout;
+    error_log /dev/stderr debug;
+
+    auth_request /validate-token;
+
+    set $upstream_@@SVC_VAR@@ http://@@SVC_NAME@@:@@SVC_PORT@@;
+    rewrite ^/@@SVC_NAME@@/(.*)$ /api/$1 break;
+    proxy_pass $upstream_@@SVC_VAR@@;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Authorization $derived_authorization;
+}

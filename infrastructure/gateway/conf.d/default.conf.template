@@ -1,0 +1,445 @@
+# Upstream definitions
+# All upstreams use resolver + variable pattern so nginx resolves at request time,
+# not boot time. This prevents crashes when services start after the gateway.
+
+# Optimized CORS configuration - single map approach
+map $http_origin $cors_allow_origin {
+    # Default case - no origin allowed
+    default "";
+
+    # Production domain — TODO: set when hosting is chosen (OUTLINE: "decide later").
+    # Mirror the per-league web-app pattern: apex + any subdomain. Uncomment and
+    # replace the placeholder once the real fantasy-app domain exists.
+    # "~^https://[^.]+\.fantasyapp\.example$" $http_origin;
+    # "https://fantasyapp.example" $http_origin;
+    # "https://app.fantasyapp.example" $http_origin;
+
+    # Local development. Match the bare hostnames AND any port we use
+    # locally — the tenant-web dev gateway publishes on :880 and the SPA
+    # speaks to the API gateway on :443/localhost. Add new entries here
+    # if you spin up a service on another port.
+    "~^https?://localhost(:[0-9]+)?$" $http_origin;
+    "~^https?://127\.0\.0\.1(:[0-9]+)?$" $http_origin;
+}
+
+# Derive an Authorization header backends can rely on.
+#
+# Frontends talking to the API gateway don't manage the JWT directly —
+# it lives in the HttpOnly `token_verifier` cookie which the browser
+# sends automatically on credentialed requests. If the request doesn't
+# carry an Authorization header, synthesize one from the cookie so
+# services (and the /validate-token sub-request) can bearerToken() it
+# without knowing about cookies.
+map $cookie_token_verifier $bearer_from_cookie {
+    default  "Bearer $cookie_token_verifier";
+    ""       "";
+}
+map $http_authorization $derived_authorization {
+    default  $http_authorization;
+    ""       $bearer_from_cookie;
+}
+
+# HTTP to HTTPS redirect
+server {
+    listen 80;
+    # TODO: add the production api hostname here once the domain is chosen.
+    server_name localhost;
+
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS API Gateway
+server {
+    # HTTPS
+    listen 443 ssl;
+    # TODO: add the production api hostname here once the domain is chosen.
+    server_name localhost;
+
+    # SSL certificates path from environment variables
+    # The path will be set via environment variables injected from .env files
+    ssl_certificate     ${SSL_CERTIFICATE_PATH}/cert.pem;
+    ssl_certificate_key ${SSL_CERTIFICATE_PATH}/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    # Use Docker's embedded DNS so all proxy_pass variables resolve at request time
+    resolver 127.0.0.11 valid=30s;
+
+    # Logging
+    error_log /dev/stderr debug;
+
+    # Upload size cap. nginx defaults to 1M and 413s anything larger before
+    # the body even reaches the upstream — which surfaces as a bare nginx
+    # 413 page in the browser (most often from Adminer SQL imports / file
+    # uploads through the per-service blocks). 200M comfortably covers
+    # typical SQL dumps and seed files; raise if a specific upstream
+    # legitimately needs more.
+    client_max_body_size 200M;
+
+    # Hide any CORS headers that might be set by the proxied services —
+    # the gateway is the single source of truth for CORS.
+    proxy_hide_header 'Access-Control-Allow-Origin';
+    proxy_hide_header 'Access-Control-Allow-Methods';
+    proxy_hide_header 'Access-Control-Allow-Headers';
+    proxy_hide_header 'Access-Control-Allow-Credentials';
+
+    # Server-level CORS defaults. `always` makes them emit on 4xx/5xx
+    # responses too (without it, a backend 500 arrives at the browser
+    # with no ACAO header and gets swallowed as a CORS error, masking
+    # the real failure). Locations that define their own add_header
+    # (/me, /login, /sign-in, /sign-out) override these for themselves,
+    # which is fine — they emit the same headers with the same $cors_allow_origin.
+    add_header 'Access-Control-Allow-Origin'      $cors_allow_origin always;
+    add_header 'Access-Control-Allow-Methods'     'GET, POST, PUT, PATCH, DELETE, OPTIONS' always;
+    add_header 'Access-Control-Allow-Headers'     'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Current-Subdomain, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+    add_header 'Access-Control-Allow-Credentials' 'true' always;
+
+    # Short-circuit every CORS preflight at the gateway. `add_header` is
+    # not allowed inside a server-level `if`, but `return` is — and the
+    # server-level add_header blocks above emit on the 204 response
+    # thanks to `always`, so the browser still sees the CORS headers.
+    if ($request_method = 'OPTIONS') {
+        return 204;
+    }
+
+    # Test endpoint for health checking - no authentication required
+    location = /test {
+        access_log /dev/stdout;
+        error_log /dev/stderr debug;
+
+        # Return a simple JSON response
+        add_header Content-Type application/json;
+        return 200 '{"status":"success","message":"Gateway is working!","timestamp":"$time_iso8601"}';
+    }
+
+    # Handle /me endpoint with proper CORS support and token validation
+    location = /me {
+
+        # Handle OPTIONS preflight requests
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Current-Subdomain, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+            add_header 'Access-Control-Allow-Credentials' 'true' always;
+            add_header 'Content-Type' 'text/plain charset=UTF-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+
+        # If token validation is successful, proxy the request to the auth service
+        set $upstream_auth http://auth-service:9001;
+        proxy_pass $upstream_auth/api/me;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # CORS headers for successful response
+        add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+        add_header 'Access-Control-Allow-Credentials' 'true' always;
+    }
+
+    # Handle login endpoint with proper CORS support
+    location = /login {
+        # First check if it's an OPTIONS request and handle preflight
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+            add_header 'Access-Control-Allow-Credentials' 'true' always;
+            add_header 'Content-Type' 'text/plain charset=UTF-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+
+        # For non-OPTIONS requests, proxy to auth service
+        set $upstream_auth http://auth-service:9001;
+        proxy_pass $upstream_auth/api/login;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # CORS headers for successful response
+        add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+        add_header 'Access-Control-Allow-Credentials' 'true' always;
+    }
+
+    # Handle sign-in endpoint with proper CORS support
+    location = /sign-in {
+        # First check if it's an OPTIONS request and handle preflight
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+            add_header 'Access-Control-Allow-Credentials' 'true' always;
+            add_header 'Content-Type' 'text/plain charset=UTF-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+
+        # For non-OPTIONS requests, proxy to auth service
+        set $upstream_auth http://auth-service:9001;
+        proxy_pass $upstream_auth/api/sign-in;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # CORS headers for successful response
+        add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+        add_header 'Access-Control-Allow-Credentials' 'true' always;
+    }
+
+    # Handle sign-out endpoint with proper CORS support
+    location = /sign-out {
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+            add_header 'Access-Control-Allow-Credentials' 'true' always;
+            add_header 'Content-Type' 'text/plain charset=UTF-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+
+        set $upstream_auth http://auth-service:9001;
+        proxy_pass $upstream_auth/api/sign-out;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+        add_header 'Access-Control-Allow-Credentials' 'true' always;
+    }
+
+
+    # Redirect /adminer to /adminer/ so the location block matches
+    location = /adminer {
+        return 301 /adminer/;
+    }
+
+    # Adminer — sub-path reverse proxy
+    #
+    # Subtlety: when proxy_pass uses a variable (required by our
+    # resolver-at-request-time pattern), nginx does NOT do URI rewriting,
+    # so the /adminer/ prefix would otherwise be forwarded verbatim.
+    # `rewrite ... break` strips it before proxy_pass runs while preserving
+    # the query string. The <base> tag injection makes Adminer's relative
+    # URLs (CSS, form actions, links) resolve under /adminer/ in the browser.
+    location /adminer/ {
+        set $upstream_adminer http://adminer:8080;
+        rewrite ^/adminer/(.*)$ /$1 break;
+        proxy_pass $upstream_adminer;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Required: disable compression so sub_filter can rewrite the response
+        proxy_set_header Accept-Encoding "";
+
+        # Fix any absolute Location headers Adminer emits.
+        proxy_redirect ~^https?://[^/]+/(.*)$ /adminer/$1;
+        proxy_redirect /  /adminer/;
+
+        # Cookie path (so browser sends Adminer's cookies back on /adminer/)
+        # and Secure flag (HTTPS site \u2014 Chrome will silently drop a
+        # SameSite=None cookie that isn't Secure, which is the usual cause
+        # of the "always bounced back to login" loop).
+        proxy_cookie_path  /  /adminer/;
+        proxy_cookie_flags ~ secure samesite=lax;
+
+        # Inject <base> tag so all relative URLs (CSS, forms, links) resolve correctly
+        sub_filter '</head>' '<base href="/adminer/">\n</head>';
+        sub_filter_once on;
+        sub_filter_types text/html;
+    }
+
+    # Redirect /laf-connector → /laf-connector/ so the location below matches.
+    location = /laf-connector {
+        return 301 /laf-connector/;
+    }
+
+    # laf-connector UI + its /api endpoints — sub-path reverse proxy.
+    #
+    # Same rewrite idiom as /adminer and /portainer: strip the prefix so
+    # the upstream sees its own paths (it was designed to run at /).
+    # The UI's `api()` helper derives its prefix from `window.location`,
+    # so fetch('/api/status') becomes '/laf-connector/api/status' in the
+    # browser and gets stripped back to '/api/status' before it lands on
+    # the connector. Tokens and DSNs stay in the container's /data
+    # volume — nothing ever lives on disk at the gateway side.
+    location /laf-connector/ {
+        set $upstream_lafconn http://laf-connector:8765;
+        rewrite ^/laf-connector/(.*)$ /$1 break;
+        proxy_pass $upstream_lafconn;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Scope Set-Cookie to the sub-path so the session cookie is sent
+        # back on every /laf-connector/* request, and mark it Secure
+        # since the gateway terminates TLS.
+        proxy_cookie_path  /  /laf-connector/;
+        proxy_cookie_flags ~ secure samesite=lax;
+
+        # Long-lived poll + small UI, no compression tricks needed.
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
+    # Redirect /portainer → /portainer/ so the location below matches.
+    location = /portainer {
+        return 301 /portainer/;
+    }
+
+    # Portainer — sub-path reverse proxy.
+    #
+    # Portainer's `--base-url=/portainer` flag (see compose) only adjusts
+    # the asset URLs in the served HTML; it does NOT move the routing,
+    # so /portainer/ on the upstream still 404s while / serves the SPA.
+    # We therefore strip the /portainer/ prefix in nginx, hit Portainer's
+    # real root, and rely on --base-url to keep the browser fetching
+    # subsequent assets/API calls back through /portainer/* (which we
+    # strip again on each request).
+    location /portainer/ {
+        set $portainer_upstream "portainer";
+        rewrite ^/portainer/(.*)$ /$1 break;
+        proxy_pass https://$portainer_upstream:9443;
+
+        # Portainer ships a self-signed cert for its HTTPS listener
+        proxy_ssl_verify off;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /portainer;
+
+        # WebSocket support (Portainer's live log/exec streams)
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
+        # Keep cookies scoped so the browser actually sends them back on /portainer/
+        proxy_cookie_path  /  /portainer/;
+        proxy_cookie_flags ~ secure samesite=lax;
+
+        # Rewrite Set-Cookie / Location headers Portainer emits at the
+        # upstream root back to the public /portainer/ namespace.
+        proxy_redirect ~^https?://[^/]+/(.*)$ /portainer/$1;
+        proxy_redirect /  /portainer/;
+    }
+
+    # Event Bus
+    location /event-bus/ {
+        set $upstream_eventbus http://event-bus:15672;
+        proxy_pass $upstream_eventbus/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Global Cache API
+    #
+    # Uses the same `rewrite … break; proxy_pass $upstream;` idiom as the
+    # generated service blocks: `proxy_pass $upstream/global-cache/;` with a
+    # variable upstream would silently drop the rest of the request URI.
+    location /cache/ {
+        # First, validate the token through the authentication service
+        auth_request /validate-token;
+
+        set $upstream_cache http://global-cache-api:1001;
+        rewrite ^/cache/(.*)$ /global-cache/$1 break;
+        proxy_pass $upstream_cache;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization $derived_authorization;
+    }
+
+    # Orchestrator — migration batch execution (and future API endpoints).
+    #
+    # The Migration Engine POSTs an unexecuted TransactionEvent batch to
+    # /orchestrator/migration/execute. Same `rewrite … break; proxy_pass
+    # $upstream;` idiom as /cache/: strip the /orchestrator/ prefix to /api/
+    # so the request lands on orchestrator-web's Laravel routes (routes/api.php),
+    # and resolve the upstream at request time so the gateway boots even when
+    # orchestrator-web isn't up yet.
+    location /orchestrator/ {
+        auth_request /validate-token;
+
+        set $upstream_orchestrator http://orchestrator-web:1000;
+        rewrite ^/orchestrator/(.*)$ /api/$1 break;
+        proxy_pass $upstream_orchestrator;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Authorization $derived_authorization;
+
+        # Bulk imports can carry large batches and take a while to publish.
+        client_max_body_size 200M;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    # ── Module service blocks ───────────────────────────────────────────
+    # The per-service location blocks (auth-service, bid-service, …) are
+    # assembled at container-start time by entrypoint.sh from the snippet
+    # templates in /etc/nginx/templates/. The generator walks registrar.json,
+    # cross-references ACTIVE_MODULES + is_resolvable probes to build the
+    # enabled_services set, and expands:
+    #   - authenticating_service_template  → for auth-service (no auth_request)
+    #   - conforming_service_template      → for every other module service
+    #   - an inline 503 stub               → for registered-but-inactive services
+    # The generated blocks get substituted in place of the marker below.
+    # ────────────────────────────────────────────────────────────────────
+    # @@SERVICE_LOCATIONS@@
+
+    # Direct validate token endpoint
+    location = /validate-token {
+        internal;
+
+        access_log /dev/stdout;
+        error_log /dev/stderr debug;
+
+        set $upstream_auth_validate http://auth-service:9001;
+        proxy_pass $upstream_auth_validate/api/validate;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URI $request_uri;
+        proxy_set_header Authorization $derived_authorization;
+    }
+
+    # Error handling for authentication failure
+    error_page 401 = @error401;
+    location @error401 {
+        # Emit CORS on auth failures so the browser surfaces the 401 to
+        # the SPA (otherwise the "No Access-Control-Allow-Origin" error
+        # masks the real cause).
+        add_header 'Access-Control-Allow-Origin' $cors_allow_origin always;
+        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, Accept, Origin, X-Requested-With, X-Tenant-Schema, Idempotency-Key, CQRS-Type' always;
+        add_header 'Access-Control-Allow-Credentials' 'true' always;
+        default_type application/json;
+        return 401 '{"error": "Unauthorized access"}';
+    }
+}

@@ -380,6 +380,52 @@ worker (event publisher). RabbitMQ event bus: `EVENTBUS_HOST=event-bus`.
 
 ---
 
+## MCP Servers & Workflow
+
+Project-scoped MCP servers are declared in committed `.mcp.json`. Credentials are **never**
+committed — they expand from the shell environment when `claude` launches.
+
+### Configured servers
+
+| Server | Purpose | Access |
+|--------|---------|--------|
+| `mysql` | Inspect tenant/service schemas directly (table layout, column types, sample rows) | **Read-only** — `ALLOW_INSERT/UPDATE/DELETE_OPERATION=false`. Connect as the `laravel` user, never root. |
+| `github` | Read issues/PRs/repo metadata | Optional — disabled unless `GITHUB_PERSONAL_ACCESS_TOKEN` is set. We otherwise use the `gh` CLI. |
+
+### Environment setup
+
+Set these in your shell before launching `claude` (e.g. `~/.zshrc`, or
+`set -a; source .mcp.env; set +a; claude`). Put real values in `.mcp.env` — it is gitignored.
+
+```bash
+# mysql (read-only) — point PORT at the per-service MySQL container you want to inspect;
+# each service exposes its own host port in docker-compose.development.yml
+FANTASY_MCP_MYSQL_HOST=127.0.0.1
+FANTASY_MCP_MYSQL_PORT=3306         # e.g. the auth-service or league-service DB host port
+FANTASY_MCP_MYSQL_USER=laravel
+FANTASY_MCP_MYSQL_PASS=<dev password from that service's docker-compose>
+FANTASY_MCP_MYSQL_DB=<schema to inspect, e.g. a tenant/league schema>
+
+# github (optional) — fine-grained PAT, read-only on this repo; leave unset to disable
+GITHUB_PERSONAL_ACCESS_TOKEN=<pat>
+```
+
+The `mysql` server is the fastest way to confirm a manifest's field names/types against the actual
+DB (Bug 11) and to verify a tenant schema exists before issuing a JWT (Bug 7). Treat
+`manifest.json` as ground truth — use the DB to *confirm*, not to override it.
+
+### Plan-mode-first & audit discipline
+
+- **Plan mode first** for any multi-file change (LAF fixes, porting a v1 screen, cross-service
+  edits): enter plan mode, get the plan approved, then execute. Skip it only for trivial,
+  single-file edits.
+- **Run `/laf-audit` immediately after every LAF generation pass**, before touching the generated
+  code — it sweeps the known-bug catalog (`BaseQueryContract`, stray `rules()`, port 9000, missing
+  `service_infra_models.sql`, `db_users.sql` DROP/CREATE USER).
+- Run `/security-check` before any commit that adds routes or touches auth.
+
+---
+
 ## Code Style & Conventions
 
 - Models: `final class`, explicit `protected $table`, explicit `$fillable`, typed `$casts`.

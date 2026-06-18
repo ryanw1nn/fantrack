@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "mysql": {
+      "command": "npx",
+      "args": ["-y", "@benborla29/mcp-server-mysql"],
+      "env": {
+        "MYSQL_HOST": "${FANTASY_MCP_MYSQL_HOST:-127.0.0.1}",
+        "MYSQL_PORT": "${FANTASY_MCP_MYSQL_PORT:-3306}",
+        "MYSQL_USER": "${FANTASY_MCP_MYSQL_USER:-laravel}",
+        "MYSQL_PASS": "${FANTASY_MCP_MYSQL_PASS}",
+        "MYSQL_DB": "${FANTASY_MCP_MYSQL_DB}",
+        "ALLOW_INSERT_OPERATION": "false",
+        "ALLOW_UPDATE_OPERATION": "false",
+        "ALLOW_DELETE_OPERATION": "false"
+      }
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    }
+  }
+}

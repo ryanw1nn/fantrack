@@ -1,8 +1,8 @@
 {
     "permissions": {
         "allow": [
-            "Bash(docker compose:*",
-            "Bash(php artisan:*",
+            "Bash(docker compose:*)",
+            "Bash(php artisan:*)",
             "Bash(composer:*)",
             "Bash(npm:*)",
             "Bash(grep:*)",
@@ -12,5 +12,24 @@
             "Bash(git log:*)"
         ],
         "deny": []
+    },
+    "hooks": {
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/secret-scan.sh" }
+                ]
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Write|Edit",
+                "hooks": [
+                    { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/php-lint.sh" },
+                    { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/frontend-lint.sh" }
+                ]
+            }
+        ]
     }
 }

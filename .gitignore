@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.mcp.env
 
 # Claude personal overrides
 .claude/settings.local.json
